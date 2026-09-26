@@ -1,0 +1,1234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MotherLink AI — Track. Remember. Respond.</title>
+<meta name="description" content="A smart maternal check-in companion for pregnancy appointments, vaccinations and daily symptom check-ins." />
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: {
+          display: ['Fraunces', 'serif'],
+          sans: ['Inter', 'sans-serif'],
+        },
+        colors: {
+          navy: '#17233C',
+          lavender: '#EDE9FE',
+          peach: '#FFE4D6',
+          mint: '#DDF7EE',
+          skyblue: '#DCEBFF',
+          amber: '#F4B942',
+          alert: '#D9534F',
+          ink: '#263238',
+        },
+        borderRadius: {
+          '2xl': '1.25rem',
+          '3xl': '1.75rem',
+        },
+        keyframes: {
+          rise: { '0%': { opacity: 0, transform: 'translateY(10px)' }, '100%': { opacity: 1, transform: 'translateY(0)' } },
+          pulseSoft: { '0%,100%': { opacity: 1 }, '50%': { opacity: .55 } },
+        },
+        animation: {
+          rise: 'rise .5s ease-out both',
+          pulseSoft: 'pulseSoft 2.4s ease-in-out infinite',
+        }
+      }
+    }
+  }
+</script>
+
+<style>
+  html { scroll-behavior: smooth; }
+  body { font-family: 'Inter', sans-serif; color: #263238; background: #FAF9FC; }
+  .font-display { font-family: 'Fraunces', serif; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 8px; }
+  .glass {
+    background: rgba(255,255,255,0.6);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255,255,255,0.5);
+  }
+  .focus-ring:focus-visible { outline: 3px solid #17233C; outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+  }
+  .no-scrollbar::-webkit-scrollbar { display:none; }
+  .no-scrollbar { -ms-overflow-style:none; scrollbar-width:none; }
+</style>
+</head>
+<body class="antialiased">
+
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react,env">
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+/* ============================= STORAGE ============================= */
+const STORAGE_KEY = 'motherlink_v1';
+
+function defaultData() {
+  return {
+    onboarded: false,
+    profile: {
+      name: 'Amara',
+      dueDate: null,
+      reminderPrefs: { checkups: true, vaccinations: true, checkin: true, appointments: true },
+      reminderTime: 'Morning',
+    },
+    events: [],
+    checkins: [],
+    journal: [],
+    notifications: [],
+  };
+}
+
+function loadData() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return defaultData();
+    const parsed = JSON.parse(raw);
+    return { ...defaultData(), ...parsed, profile: { ...defaultData().profile, ...(parsed.profile||{}) } };
+  } catch (e) {
+    return defaultData();
+  }
+}
+
+function saveData(data) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); } catch (e) { /* storage unavailable */ }
+}
+
+/* ============================= DATE HELPERS ============================= */
+const DAY = 86400000;
+
+function isoDate(d) { const x = new Date(d); x.setHours(0,0,0,0); return x.toISOString().slice(0,10); }
+function today() { return isoDate(new Date()); }
+function addDays(dateStr, days) { const d = new Date(dateStr); d.setDate(d.getDate()+days); return isoDate(d); }
+function daysBetween(a, b) { return Math.round((new Date(b) - new Date(a)) / DAY); }
+function fmtDate(dateStr) {
+  if (!dateStr) return '—';
+  const d = new Date(dateStr);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+function fmtCountdown(dateStr) {
+  const diff = daysBetween(today(), dateStr);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Tomorrow';
+  if (diff === -1) return 'Yesterday';
+  if (diff < 0) return `${Math.abs(diff)} days ago`;
+  if (diff < 14) return `In ${diff} days`;
+  const w = Math.round(diff/7);
+  return `In ${w} week${w===1?'':'s'}`;
+}
+
+function pregnancyWeek(dueDate) {
+  if (!dueDate) return null;
+  const totalDays = 280;
+  const conception = addDays(dueDate, -totalDays);
+  const elapsed = daysBetween(conception, today());
+  const week = Math.max(0, Math.min(42, Math.floor(elapsed/7)));
+  return week;
+}
+function trimesterOf(week) {
+  if (week === null) return null;
+  if (week <= 13) return 1;
+  if (week <= 27) return 2;
+  return 3;
+}
+
+/* ============================= SCHEDULE ENGINE ============================= */
+const MILESTONE_TEMPLATE = [
+  { week: 8,  type: 'checkup',     title: 'First prenatal visit' },
+  { week: 12, type: 'checkup',     title: 'First trimester checkup' },
+  { week: 16, type: 'checkup',     title: 'Routine checkup' },
+  { week: 20, type: 'checkup',     title: 'Anatomy scan checkup' },
+  { week: 24, type: 'checkup',     title: 'Glucose screening checkup' },
+  { week: 27, type: 'vaccination', title: 'Tdap vaccination' },
+  { week: 28, type: 'checkup',     title: 'Third trimester checkup' },
+  { week: 30, type: 'vaccination', title: 'Flu vaccination' },
+  { week: 32, type: 'checkup',     title: 'Routine checkup' },
+  { week: 36, type: 'checkup',     title: 'Group B strep screening' },
+  { week: 38, type: 'checkup',     title: 'Weekly checkup' },
+  { week: 40, type: 'appointment', title: 'Estimated due date' },
+];
+
+function generateEvents(dueDate) {
+  const conception = addDays(dueDate, -280);
+  return MILESTONE_TEMPLATE.map((m, i) => ({
+    id: `evt-${i}-${m.week}`,
+    type: m.type,
+    title: m.title,
+    date: addDays(conception, m.week*7),
+    week: m.week,
+    status: 'upcoming',
+    reminderOn: true,
+  }));
+}
+
+const WARNING_SYMPTOMS = [
+  'Bleeding',
+  'Severe headache',
+  'Sudden or unusual swelling',
+  'Severe abdominal pain',
+  'Difficulty breathing',
+  'Noticeably reduced or changed fetal movement',
+];
+
+/* ============================= ICON (lightweight inline set) ============================= */
+function Icon({ name, className = "w-5 h-5", strokeWidth=1.8 }) {
+  const common = { className, fill: "none", viewBox: "0 0 24 24", stroke: "currentColor", strokeWidth, strokeLinecap: "round", strokeLinejoin: "round" };
+  const paths = {
+    home: <path d="M3 11.5 12 4l9 7.5M5 10v9a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1v-9" />,
+    calendar: <><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></>,
+    check: <><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/><path d="M9 15l2 2 4-4"/></>,
+    bell: <path d="M6 8a6 6 0 1 1 12 0c0 4 1.5 5.5 1.5 5.5H4.5S6 12 6 8Z M10 19a2 2 0 0 0 4 0" />,
+    more: <><circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none"/></>,
+    user: <><circle cx="12" cy="8" r="4"/><path d="M4 20c1.5-4 5-5 8-5s6.5 1 8 5"/></>,
+    heart: <path d="M12 20s-7-4.5-9.5-9C.7 7.4 2 4 5.3 4c2 0 3.4 1.2 4.2 2.4C10.3 5.2 11.7 4 13.7 4 17 4 18.3 7.4 21.5 11c-2.5 4.5-9.5 9-9.5 9Z" />,
+    shield: <path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3Z" />,
+    book: <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5V5.5Z M20 18H6.5A2.5 2.5 0 0 0 4 20.5" />,
+    arrowRight: <path d="M5 12h14M13 6l6 6-6 6" />,
+    chevronDown: <path d="M6 9l6 6 6-6" />,
+    x: <path d="M6 6l12 12M18 6 6 18" />,
+    plus: <path d="M12 5v14M5 12h14" />,
+    sparkle: <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z" />,
+    phone: <path d="M6.6 10.8c1.4 2.8 3.8 5.2 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.3 21 3 13.7 3 4.9c0-.6.4-1 1-1h3.4c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.4 0 .8-.2 1l-2.2 2.3Z" />,
+    edit: <path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z" />,
+    filter: <path d="M4 5h16M7 12h10M10 19h4" />,
+    trend: <path d="M4 16l5-5 4 3 7-8M20 6h-4v4" />,
+  };
+  return <svg {...common}>{paths[name] || null}</svg>;
+}
+
+/* ============================= UI PRIMITIVES ============================= */
+function Button({ children, variant='primary', className='', ...props }) {
+  const base = "inline-flex items-center justify-center gap-2 rounded-2xl px-5 py-3 text-sm font-semibold transition-all focus-ring active:scale-[0.98]";
+  const variants = {
+    primary: "bg-navy text-white hover:bg-[#0f1830] shadow-lg shadow-navy/20",
+    secondary: "bg-white text-navy border border-navy/15 hover:border-navy/30",
+    ghost: "text-navy hover:bg-navy/5",
+    danger: "bg-alert text-white hover:bg-[#c24540]",
+    soft: "bg-lavender text-navy hover:bg-[#e2dbfb]",
+  };
+  return <button className={`${base} ${variants[variant]} ${className}`} {...props}>{children}</button>;
+}
+
+function Card({ children, className='' }) {
+  return <div className={`rounded-3xl bg-white/90 border border-black/5 shadow-sm ${className}`}>{children}</div>;
+}
+
+function Pill({ children, tone='navy' }) {
+  const tones = {
+    navy: 'bg-navy/8 text-navy',
+    amber: 'bg-amber/20 text-[#8a5a06]',
+    alert: 'bg-alert/12 text-alert',
+    mint: 'bg-mint text-[#1f6b52]',
+    blue: 'bg-skyblue text-[#1c4d8a]',
+  };
+  return <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold ${tones[tone]}`}>{children}</span>;
+}
+
+function StatusPill({ status }) {
+  if (status === 'completed') return <Pill tone="mint">Completed</Pill>;
+  return <Pill tone="blue">Upcoming</Pill>;
+}
+
+function Footer() {
+  return (
+    <footer className="mt-16 border-t border-black/5 bg-white/70">
+      <div className="max-w-5xl mx-auto px-6 py-8 text-sm text-ink/60 leading-relaxed">
+        <p>MotherLink AI provides reminders, organization and symptom flagging for demonstration purposes. It does not diagnose medical conditions or replace advice from a qualified healthcare professional.</p>
+      </div>
+    </footer>
+  );
+}
+
+function EmptyState({ title, subtitle, action }) {
+  return (
+    <div className="text-center py-14 px-6 rounded-3xl bg-lavender/40 border border-dashed border-navy/15">
+      <div className="w-12 h-12 rounded-2xl bg-white flex items-center justify-center mx-auto mb-4 shadow-sm">
+        <Icon name="sparkle" className="w-6 h-6 text-navy/50" />
+      </div>
+      <h3 className="font-display text-lg text-navy mb-1">{title}</h3>
+      <p className="text-sm text-ink/60 max-w-xs mx-auto mb-5">{subtitle}</p>
+      {action}
+    </div>
+  );
+}
+
+/* ============================= LANDING ============================= */
+function Landing({ onStart }) {
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-lavender/60 via-white to-skyblue/40">
+      <nav className="max-w-6xl mx-auto px-6 py-6 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="w-9 h-9 rounded-xl bg-navy flex items-center justify-center">
+            <Icon name="heart" className="w-4 h-4 text-white" strokeWidth={2}/>
+          </div>
+          <span className="font-display text-xl text-navy">MotherLink AI</span>
+        </div>
+        <Button variant="ghost" onClick={onStart}>Sign in</Button>
+      </nav>
+
+      <header className="max-w-5xl mx-auto px-6 pt-10 pb-20 text-center">
+        <div className="inline-flex mb-6 animate-rise">
+          <Pill tone="blue">Maternal check-in companion</Pill>
+        </div>
+        <h1 className="font-display text-5xl sm:text-6xl text-navy leading-[1.05] mb-5 animate-rise" style={{animationDelay:'.05s'}}>
+          Track. Remember.<br/>Respond.
+        </h1>
+        <p className="text-lg text-ink/70 max-w-xl mx-auto mb-9 animate-rise" style={{animationDelay:'.1s'}}>
+          A smart maternal check-in companion that helps you stay organized with pregnancy appointments, vaccinations and daily symptom check-ins.
+        </p>
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-3 mb-14 animate-rise" style={{animationDelay:'.15s'}}>
+          <Button onClick={onStart} className="w-full sm:w-auto text-base px-7 py-3.5">
+            Get Started <Icon name="arrowRight" className="w-4 h-4" />
+          </Button>
+          <a href="#features">
+            <Button variant="secondary" className="w-full sm:w-auto text-base px-7 py-3.5">Explore Features</Button>
+          </a>
+        </div>
+
+        {/* Hero visual */}
+        <div className="relative max-w-3xl mx-auto animate-rise" style={{animationDelay:'.2s'}}>
+          <div className="glass rounded-3xl p-8 sm:p-10 shadow-xl">
+            <svg viewBox="0 0 600 220" className="w-full h-auto">
+              <defs>
+                <linearGradient id="g1" x1="0" x2="1">
+                  <stop offset="0%" stopColor="#EDE9FE" />
+                  <stop offset="100%" stopColor="#DCEBFF" />
+                </linearGradient>
+              </defs>
+              <rect x="0" y="0" width="600" height="220" rx="24" fill="url(#g1)" opacity="0.6" />
+              <line x1="60" y1="150" x2="540" y2="150" stroke="#17233C" strokeOpacity="0.25" strokeWidth="2" strokeDasharray="2 8" strokeLinecap="round" />
+              {[110,230,350,470].map((x,i)=>(
+                <circle key={i} cx={x} cy="150" r={i===1?7:5} fill={i===1? '#17233C':'#ffffff'} stroke="#17233C" strokeWidth="1.5" />
+              ))}
+              {/* silhouette */}
+              <path d="M300 40c-16 0-27 13-27 28 0 10 5 18 12 23-18 8-28 24-28 46v10h86v-10c0-22-10-38-28-46 7-5 12-13 12-23 0-15-11-28-27-28Z" fill="#17233C" opacity="0.85" />
+              {/* icons */}
+              <g transform="translate(150,60)" opacity="0.9">
+                <rect x="-14" y="-14" width="28" height="28" rx="8" fill="#FFE4D6" />
+                <path d="M-6 0h12M0 -6v12" stroke="#8a5a06" strokeWidth="2" strokeLinecap="round" />
+              </g>
+              <g transform="translate(450,70)" opacity="0.9">
+                <rect x="-14" y="-14" width="28" height="28" rx="8" fill="#DDF7EE" />
+                <path d="M-6 2l4 4 8-9" stroke="#1f6b52" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+              </g>
+            </svg>
+          </div>
+          <p className="text-xs text-ink/50 mt-4">Designed as a supportive reminder and check-in tool — not a replacement for professional medical care.</p>
+        </div>
+      </header>
+
+      <section id="features" className="max-w-6xl mx-auto px-6 pb-24">
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">
+          {[
+            { icon:'calendar', tone:'blue', title:'Pregnancy timeline', body:'A week-by-week view of your journey with checkups, vaccinations and milestones, generated from your due date.' },
+            { icon:'check', tone:'mint', title:'Daily check-ins', body:'Log symptoms in seconds and get a gentle nudge to contact your provider if something needs attention.' },
+            { icon:'bell', tone:'amber', title:'Smart reminders', body:'Reminders prioritized by how soon they are due and whether you have preferences turned on.' },
+            { icon:'trend', tone:'navy', title:'Care history', body:'See completed and upcoming care side by side, with simple progress tracking.' },
+            { icon:'book', tone:'blue', title:'Health journal', body:'A private, freeform space to note how you are feeling day to day.' },
+            { icon:'shield', tone:'mint', title:'Built for safety', body:'Reassuring language throughout, with clear guidance to reach a healthcare professional when needed.' },
+          ].map((f,i)=>(
+            <Card key={i} className="p-6">
+              <div className={`w-11 h-11 rounded-2xl flex items-center justify-center mb-4 ${f.tone==='blue'?'bg-skyblue':f.tone==='mint'?'bg-mint':f.tone==='amber'?'bg-amber/25':'bg-navy/8'}`}>
+                <Icon name={f.icon} className="w-5 h-5 text-navy" />
+              </div>
+              <h3 className="font-display text-lg text-navy mb-1.5">{f.title}</h3>
+              <p className="text-sm text-ink/65 leading-relaxed">{f.body}</p>
+            </Card>
+          ))}
+        </div>
+      </section>
+
+      <Footer />
+    </div>
+  );
+}
+
+/* ============================= ONBOARDING ============================= */
+function Onboarding({ onComplete }) {
+  const [step, setStep] = useState(1);
+  const [dueDate, setDueDate] = useState('');
+  const [prefs, setPrefs] = useState({ checkups:true, vaccinations:true, checkin:true, appointments:true });
+  const [time, setTime] = useState('Morning');
+  const [error, setError] = useState('');
+
+  const steps = [{n:1,label:'Personalize'},{n:2,label:'Reminders'},{n:3,label:'Timeline'}];
+
+  function next() {
+    if (step===1) {
+      if (!dueDate) { setError('Please select your expected due date.'); return; }
+      const d = new Date(dueDate);
+      if (isNaN(d.getTime())) { setError('That date does not look right.'); return; }
+      setError('');
+    }
+    setStep(s => Math.min(3, s+1));
+  }
+
+  function finish() {
+    onComplete({ dueDate, reminderPrefs: prefs, reminderTime: time });
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-lavender/50 to-white flex items-center justify-center px-6 py-12">
+      <div className="w-full max-w-lg">
+        <div className="flex items-center justify-center gap-3 mb-8">
+          {steps.map((s,i)=>(
+            <React.Fragment key={s.n}>
+              <div className="flex items-center gap-2">
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${step>=s.n? 'bg-navy text-white':'bg-navy/10 text-navy/50'}`}>{s.n}</div>
+                <span className={`text-xs font-medium hidden sm:inline ${step>=s.n?'text-navy':'text-ink/40'}`}>{s.label}</span>
+              </div>
+              {i<steps.length-1 && <div className={`w-8 h-0.5 rounded ${step>s.n?'bg-navy':'bg-navy/10'}`} />}
+            </React.Fragment>
+          ))}
+        </div>
+
+        <Card className="p-8">
+          {step===1 && (
+            <div className="animate-rise">
+              <h2 className="font-display text-2xl text-navy mb-1">When are you due?</h2>
+              <p className="text-sm text-ink/60 mb-6">We'll build a personalized timeline from this date.</p>
+              <label className="block text-sm font-semibold text-navy mb-2">Expected due date</label>
+              <input
+                type="date"
+                value={dueDate}
+                onChange={e=>setDueDate(e.target.value)}
+                className="w-full rounded-xl border border-navy/15 px-4 py-3 text-ink focus-ring outline-none"
+              />
+              {error && <p className="text-alert text-sm mt-2">{error}</p>}
+            </div>
+          )}
+
+          {step===2 && (
+            <div className="animate-rise">
+              <h2 className="font-display text-2xl text-navy mb-1">What should we remind you about?</h2>
+              <p className="text-sm text-ink/60 mb-6">You can change these anytime in your profile.</p>
+              <div className="space-y-3">
+                {[
+                  {k:'checkups', label:'Checkup reminders'},
+                  {k:'vaccinations', label:'Vaccination reminders'},
+                  {k:'checkin', label:'Daily symptom check-in'},
+                  {k:'appointments', label:'Appointment reminders'},
+                ].map(item=>(
+                  <label key={item.k} className="flex items-center gap-3 p-3 rounded-xl border border-navy/10 hover:border-navy/25 cursor-pointer transition-colors">
+                    <input type="checkbox" checked={prefs[item.k]} onChange={e=>setPrefs(p=>({...p,[item.k]:e.target.checked}))} className="w-5 h-5 rounded accent-[#17233C]" />
+                    <span className="text-sm font-medium text-ink">{item.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {step===3 && (
+            <div className="animate-rise">
+              <h2 className="font-display text-2xl text-navy mb-1">Preferred reminder time</h2>
+              <p className="text-sm text-ink/60 mb-6">When should we check in with you each day?</p>
+              <div className="grid grid-cols-3 gap-3">
+                {['Morning','Afternoon','Evening'].map(t=>(
+                  <button key={t} onClick={()=>setTime(t)} className={`rounded-xl py-4 text-sm font-semibold border transition-all focus-ring ${time===t? 'bg-navy text-white border-navy':'border-navy/15 text-navy hover:border-navy/30'}`}>{t}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-8 flex items-center justify-between">
+            <Button variant="ghost" onClick={()=>setStep(s=>Math.max(1,s-1))} className={step===1?'invisible':''}>Back</Button>
+            {step<3 ? (
+              <Button onClick={next}>Continue <Icon name="arrowRight" className="w-4 h-4"/></Button>
+            ) : (
+              <Button onClick={finish}>Create My Pregnancy Timeline</Button>
+            )}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+/* ============================= NAV ============================= */
+const NAV_ITEMS = [
+  { key:'dashboard', label:'Dashboard', icon:'home' },
+  { key:'timeline', label:'Timeline', icon:'calendar' },
+  { key:'checkin', label:'Check-ins', icon:'check' },
+  { key:'reminders', label:'Reminders', icon:'bell' },
+  { key:'history', label:'History', icon:'trend' },
+  { key:'journal', label:'Health Journal', icon:'book' },
+];
+const MOBILE_ITEMS = [
+  { key:'dashboard', label:'Home', icon:'home' },
+  { key:'timeline', label:'Timeline', icon:'calendar' },
+  { key:'checkin', label:'Check-in', icon:'check' },
+  { key:'reminders', label:'Reminders', icon:'bell' },
+  { key:'more', label:'More', icon:'more' },
+];
+
+function TopNav({ view, setView, notifOpen, setNotifOpen, notifications, onMarkAllRead }) {
+  const unread = notifications.filter(n=>!n.read).length;
+  return (
+    <header className="sticky top-0 z-30 bg-white/85 backdrop-blur-md border-b border-black/5">
+      <div className="max-w-6xl mx-auto px-5 sm:px-6 h-16 flex items-center justify-between">
+        <button onClick={()=>setView('dashboard')} className="flex items-center gap-2 focus-ring rounded-lg">
+          <div className="w-8 h-8 rounded-xl bg-navy flex items-center justify-center">
+            <Icon name="heart" className="w-4 h-4 text-white" strokeWidth={2}/>
+          </div>
+          <span className="font-display text-lg text-navy hidden xs:inline">MotherLink AI</span>
+        </button>
+
+        <nav className="hidden md:flex items-center gap-1">
+          {NAV_ITEMS.map(item=>(
+            <button
+              key={item.key}
+              onClick={()=>setView(item.key)}
+              className={`px-3.5 py-2 rounded-xl text-sm font-medium transition-colors focus-ring ${view===item.key? 'bg-navy text-white':'text-ink/70 hover:bg-navy/5'}`}
+            >{item.label}</button>
+          ))}
+        </nav>
+
+        <div className="flex items-center gap-2 relative">
+          <button aria-label="Notifications" onClick={()=>setNotifOpen(o=>!o)} className="relative w-10 h-10 rounded-xl hover:bg-navy/5 flex items-center justify-center focus-ring">
+            <Icon name="bell" className="w-5 h-5 text-navy" />
+            {unread>0 && <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-alert"></span>}
+          </button>
+          <button onClick={()=>setView('profile')} className="w-10 h-10 rounded-xl bg-lavender flex items-center justify-center focus-ring">
+            <Icon name="user" className="w-5 h-5 text-navy" />
+          </button>
+
+          {notifOpen && (
+            <div className="absolute right-0 top-12 w-80 max-w-[85vw] bg-white rounded-2xl shadow-xl border border-black/5 p-2 animate-rise z-40">
+              <div className="flex items-center justify-between px-3 py-2">
+                <span className="font-display text-navy">Notifications</span>
+                <button onClick={onMarkAllRead} className="text-xs text-navy/60 hover:text-navy font-medium">Mark all as read</button>
+              </div>
+              <div className="max-h-72 overflow-y-auto no-scrollbar">
+                {notifications.length===0 && <p className="text-sm text-ink/50 px-3 py-6 text-center">You're all caught up.</p>}
+                {notifications.slice(0,10).map(n=>(
+                  <div key={n.id} className={`px-3 py-2.5 rounded-xl text-sm ${n.read? 'text-ink/50':'text-ink font-medium bg-lavender/30'}`}>{n.text}</div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function MobileNav({ view, setView, moreOpen, setMoreOpen }) {
+  return (
+    <>
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur-md border-t border-black/5 pb-safe">
+        <div className="grid grid-cols-5">
+          {MOBILE_ITEMS.map(item=>{
+            const active = item.key==='more' ? moreOpen : view===item.key;
+            return (
+              <button
+                key={item.key}
+                onClick={()=> item.key==='more' ? setMoreOpen(true) : (setMoreOpen(false), setView(item.key))}
+                className={`flex flex-col items-center justify-center gap-1 py-2.5 text-[11px] font-medium focus-ring ${active? 'text-navy':'text-ink/45'}`}
+              >
+                <Icon name={item.icon} className="w-5 h-5" />
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
+      </nav>
+      {moreOpen && (
+        <div className="md:hidden fixed inset-0 z-40 flex items-end" onClick={()=>setMoreOpen(false)}>
+          <div className="absolute inset-0 bg-navy/30" />
+          <div className="relative w-full bg-white rounded-t-3xl p-5 pb-8 animate-rise" onClick={e=>e.stopPropagation()}>
+            <div className="w-10 h-1 bg-navy/15 rounded-full mx-auto mb-4" />
+            {[
+              {key:'history', label:'Care History', icon:'trend'},
+              {key:'journal', label:'Health Journal', icon:'book'},
+              {key:'profile', label:'Profile', icon:'user'},
+            ].map(item=>(
+              <button key={item.key} onClick={()=>{setView(item.key); setMoreOpen(false);}} className="w-full flex items-center gap-3 px-3 py-3.5 rounded-xl hover:bg-navy/5 text-left">
+                <Icon name={item.icon} className="w-5 h-5 text-navy" />
+                <span className="text-sm font-medium text-ink">{item.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/* ============================= HELP WIDGET ============================= */
+function HelpWidget() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="fixed bottom-20 md:bottom-6 right-5 z-30">
+      {open && (
+        <Card className="p-5 w-72 mb-3 animate-rise">
+          <h4 className="font-display text-navy mb-1.5">Need help?</h4>
+          <p className="text-xs text-ink/60 mb-4 leading-relaxed">If you feel seriously unwell or think you may need urgent medical attention, seek appropriate emergency or professional medical care.</p>
+          <div className="space-y-2">
+            <Button variant="secondary" className="w-full text-xs py-2.5" onClick={()=>setOpen(false)}>Contact My Provider</Button>
+            <Button variant="danger" className="w-full text-xs py-2.5" onClick={()=>setOpen(false)}>Emergency Help</Button>
+          </div>
+        </Card>
+      )}
+      <button onClick={()=>setOpen(o=>!o)} className="w-14 h-14 rounded-full bg-navy text-white shadow-xl flex items-center justify-center focus-ring hover:scale-105 transition-transform">
+        <Icon name="phone" className="w-6 h-6" />
+      </button>
+    </div>
+  );
+}
+
+/* ============================= DASHBOARD ============================= */
+function CircularProgress({ pct, label, sub }) {
+  const r = 54, c = 2*Math.PI*r;
+  return (
+    <div className="relative w-36 h-36 shrink-0">
+      <svg viewBox="0 0 120 120" className="w-full h-full -rotate-90">
+        <circle cx="60" cy="60" r={r} fill="none" stroke="#EDE9FE" strokeWidth="10" />
+        <circle cx="60" cy="60" r={r} fill="none" stroke="#17233C" strokeWidth="10" strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={c - (pct/100)*c} style={{transition:'stroke-dashoffset 1s ease-out'}} />
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="font-display text-2xl text-navy">{label}</span>
+        <span className="text-[11px] text-ink/50">{sub}</span>
+      </div>
+    </div>
+  );
+}
+
+function Dashboard({ data, actions, setView }) {
+  const { profile, events, checkins, notifications } = data;
+  const week = pregnancyWeek(profile.dueDate);
+  const trimester = trimesterOf(week);
+  const daysLeft = profile.dueDate ? Math.max(0, daysBetween(today(), profile.dueDate)) : null;
+
+  const upcoming = useMemo(()=> events.filter(e=>e.status!=='completed').sort((a,b)=> new Date(a.date)-new Date(b.date)), [events]);
+  const nextCheckup = upcoming.find(e=>e.type==='checkup');
+  const nextVax = upcoming.find(e=>e.type==='vaccination');
+  const todaysCheckin = checkins.find(c=>c.date===today());
+  const pendingReminders = upcoming.filter(e=> e.reminderOn && daysBetween(today(), e.date) <= 14).length;
+
+  // smart priority: soonest, not completed, reminder on
+  const smart = useMemo(()=>{
+    const scored = upcoming.filter(e=>e.reminderOn).map(e=>{
+      const d = daysBetween(today(), e.date);
+      const score = d<0 ? 100 : Math.max(0, 60 - d);
+      return {...e, score, days:d};
+    }).sort((a,b)=>b.score-a.score);
+    return scored[0] || null;
+  }, [upcoming]);
+
+  const firstName = (profile.name||'there').split(' ')[0];
+  const hour = new Date().getHours();
+  const greeting = hour<12? 'Good morning' : hour<18 ? 'Good afternoon' : 'Good evening';
+
+  return (
+    <div className="max-w-6xl mx-auto px-5 sm:px-6 py-8 pb-28 md:pb-12">
+      <div className="mb-7 animate-rise">
+        <h1 className="font-display text-3xl text-navy">{greeting}, {firstName} 👋</h1>
+        <p className="text-ink/55 mt-1">Your maternal care overview</p>
+      </div>
+
+      {/* Today's snapshot */}
+      <Card className="p-5 sm:p-6 mb-6">
+        <h2 className="text-xs font-bold tracking-wide text-navy/50 mb-4">TODAY'S SNAPSHOT</h2>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div className="p-4 rounded-2xl bg-skyblue/50">
+            <Icon name="calendar" className="w-5 h-5 text-navy mb-2"/>
+            <p className="text-xs text-ink/55 mb-0.5">Next appointment</p>
+            <p className="font-display text-lg text-navy">{nextCheckup? fmtCountdown(nextCheckup.date) : '—'}</p>
+          </div>
+          <div className="p-4 rounded-2xl bg-peach/50">
+            <span className="text-lg leading-none">💉</span>
+            <p className="text-xs text-ink/55 mb-0.5 mt-2">Next vaccination</p>
+            <p className="font-display text-lg text-navy">{nextVax? fmtCountdown(nextVax.date) : '—'}</p>
+          </div>
+          <div className="p-4 rounded-2xl bg-mint/60">
+            <Icon name="check" className="w-5 h-5 text-navy mb-2"/>
+            <p className="text-xs text-ink/55 mb-0.5">Check-in</p>
+            <p className="font-display text-lg text-navy">{todaysCheckin? 'Completed' : 'Not completed'}</p>
+          </div>
+          <div className="p-4 rounded-2xl bg-lavender/60">
+            <Icon name="bell" className="w-5 h-5 text-navy mb-2"/>
+            <p className="text-xs text-ink/55 mb-0.5">Reminders</p>
+            <p className="font-display text-lg text-navy">{pendingReminders} upcoming</p>
+          </div>
+        </div>
+      </Card>
+
+      <div className="grid lg:grid-cols-3 gap-6 mb-6">
+        {/* Pregnancy journey card */}
+        <Card className="p-6 lg:col-span-2">
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="text-xs font-bold tracking-wide text-navy/50">PREGNANCY JOURNEY</h2>
+            {trimester && <Pill tone="blue">Trimester {trimester}</Pill>}
+          </div>
+          {profile.dueDate ? (
+            <>
+              <div className="flex items-center gap-6 mt-4 flex-wrap">
+                <CircularProgress pct={Math.min(100,(week/40)*100)} label={`Wk ${week}`} sub="of 40" />
+                <div className="flex-1 min-w-[180px] space-y-3">
+                  <div>
+                    <p className="text-xs text-ink/50">Estimated due date</p>
+                    <p className="font-semibold text-navy">{fmtDate(profile.dueDate)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-ink/50">Time remaining</p>
+                    <p className="font-semibold text-navy">{daysLeft} days to go</p>
+                  </div>
+                </div>
+              </div>
+              {/* horizontal timeline */}
+              <div className="mt-6">
+                <div className="relative h-2 bg-lavender rounded-full">
+                  <div className="absolute h-2 bg-navy rounded-full" style={{width:`${Math.min(100,(week/40)*100)}%`}}></div>
+                  {nextCheckup && (
+                    <div className="absolute -top-1.5" style={{left:`calc(${Math.min(100,(nextCheckup.week/40)*100)}% - 6px)`}}>
+                      <div className="w-5 h-5 rounded-full bg-white border-2 border-amber"></div>
+                    </div>
+                  )}
+                  <div className="absolute -top-1.5 right-0"><div className="w-5 h-5 rounded-full bg-white border-2 border-navy"></div></div>
+                </div>
+                <div className="flex justify-between text-[11px] text-ink/45 mt-2">
+                  <span>Start</span>
+                  <span>{nextCheckup? `Checkup · wk ${nextCheckup.week}`:''}</span>
+                  <span>Due date</span>
+                </div>
+              </div>
+            </>
+          ) : (
+            <EmptyState title="No timeline yet" subtitle="Add your due date in your profile to generate a personalized timeline." action={<Button onClick={()=>setView('profile')}>Go to Profile</Button>} />
+          )}
+        </Card>
+
+        {/* Smart reminder */}
+        <Card className="p-6">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-7 h-7 rounded-lg bg-amber/25 flex items-center justify-center"><Icon name="sparkle" className="w-4 h-4 text-[#8a5a06]"/></div>
+            <h2 className="text-xs font-bold tracking-wide text-navy/50">SMART CARE REMINDER</h2>
+          </div>
+          {smart ? (
+            <>
+              <p className="text-sm text-ink/60 mb-3">Your next important reminder</p>
+              <p className="font-display text-lg text-navy mb-1">{smart.type==='vaccination'?'💉':'📅'} {smart.title}</p>
+              <p className="text-sm text-ink/55 mb-3">{fmtCountdown(smart.date)} · {fmtDate(smart.date)}</p>
+              <Pill tone={smart.score>40?'alert':smart.score>15?'amber':'mint'}>Recommended priority: {smart.score>40?'HIGH':smart.score>15?'MEDIUM':'LOW'}</Pill>
+              <p className="text-xs text-ink/45 mt-3 leading-relaxed">Reason: scheduled event is approaching and has not been marked completed.</p>
+              <p className="text-[11px] text-ink/35 mt-3">This is a rule-based estimate, not a medical prediction.</p>
+            </>
+          ) : (
+            <p className="text-sm text-ink/50">No active reminders right now.</p>
+          )}
+        </Card>
+      </div>
+
+      {/* Upcoming care */}
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="font-display text-xl text-navy">Upcoming Care</h2>
+        <button onClick={()=>setView('timeline')} className="text-sm font-medium text-navy/60 hover:text-navy">View timeline</button>
+      </div>
+      <div className="grid sm:grid-cols-3 gap-4">
+        {upcoming.slice(0,3).map(e=>(
+          <EventCard key={e.id} event={e} onComplete={()=>actions.completeEvent(e.id)} />
+        ))}
+        {upcoming.length===0 && <p className="text-sm text-ink/50 py-6">Nothing upcoming — you're all caught up.</p>}
+      </div>
+    </div>
+  );
+}
+
+function EventCard({ event, onComplete }) {
+  const emoji = event.type==='vaccination' ? '💉' : event.type==='appointment' ? '🩺' : '📅';
+  const diff = daysBetween(today(), event.date);
+  const statusLabel = event.status==='completed' ? 'COMPLETED' : diff===0 ? 'TODAY' : 'UPCOMING';
+  return (
+    <Card className="p-5">
+      <div className="flex items-start justify-between mb-3">
+        <span className="text-2xl">{emoji}</span>
+        <Pill tone={event.status==='completed'?'mint': diff===0?'amber':'blue'}>{statusLabel}</Pill>
+      </div>
+      <p className="font-semibold text-navy leading-snug mb-1">{event.title}</p>
+      <p className="text-sm text-ink/55 mb-1">{fmtDate(event.date)}</p>
+      <p className="text-xs text-ink/45 mb-4">{fmtCountdown(event.date)} · Reminder {event.reminderOn?'on':'off'}</p>
+      {event.status!=='completed' && (
+        <Button variant="soft" className="w-full text-xs py-2" onClick={onComplete}>Mark as completed</Button>
+      )}
+    </Card>
+  );
+}
+
+/* ============================= TIMELINE PAGE ============================= */
+function TimelinePage({ data, actions }) {
+  const { profile, events } = data;
+  const week = pregnancyWeek(profile.dueDate);
+  if (!profile.dueDate) {
+    return <div className="max-w-4xl mx-auto px-6 py-10"><EmptyState title="No timeline yet" subtitle="Set your due date in your profile to generate a personalized timeline." /></div>;
+  }
+  return (
+    <div className="max-w-4xl mx-auto px-5 sm:px-6 py-8 pb-28 md:pb-12">
+      <h1 className="font-display text-3xl text-navy mb-1">Your Pregnancy Timeline</h1>
+      <p className="text-ink/55 mb-6">Currently week {week} · Trimester {trimesterOf(week)}</p>
+      <p className="text-xs text-ink/45 bg-lavender/40 rounded-xl px-4 py-3 mb-6">Schedule information is for demonstration and should be confirmed with a healthcare provider.</p>
+
+      <div className="relative pl-8">
+        <div className="absolute left-[11px] top-2 bottom-2 w-0.5 bg-lavender"></div>
+        {events.map(e=>{
+          const emoji = e.type==='vaccination' ? '💉' : e.type==='appointment' ? '🩺' : '📅';
+          const passed = e.week <= week;
+          return (
+            <div key={e.id} className="relative mb-5">
+              <div className={`absolute -left-8 top-1.5 w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border-2 ${e.status==='completed'?'bg-navy border-navy text-white': passed?'bg-amber/70 border-amber text-white':'bg-white border-navy/20 text-navy/40'}`}>
+                {e.status==='completed' ? '✓' : e.week}
+              </div>
+              <Card className="p-4 flex items-center justify-between gap-4 flex-wrap">
+                <div>
+                  <p className="font-semibold text-navy">{emoji} {e.title}</p>
+                  <p className="text-xs text-ink/50 mt-0.5">Week {e.week} · {fmtDate(e.date)} · {fmtCountdown(e.date)}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <StatusPill status={e.status} />
+                  {e.status!=='completed' && <Button variant="ghost" className="text-xs py-1.5 px-3" onClick={()=>actions.completeEvent(e.id)}>Mark done</Button>}
+                </div>
+              </Card>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ============================= CHECK-IN PAGE ============================= */
+function CheckinPage({ data, actions }) {
+  const [selected, setSelected] = useState([]);
+  const [other, setOther] = useState('');
+  const [feeling, setFeeling] = useState('Okay');
+  const [result, setResult] = useState(null);
+  const alreadyToday = data.checkins.find(c=>c.date===today());
+
+  function toggle(sym) {
+    setSelected(s => s.includes(sym) ? s.filter(x=>x!==sym) : [...s, sym]);
+  }
+
+  function submit() {
+    const riskFlag = selected.length > 0;
+    const entry = { id:`ci-${Date.now()}`, date: today(), feeling, symptoms: selected, other, riskFlag };
+    actions.addCheckin(entry);
+    setResult(entry);
+  }
+
+  function reset() {
+    setSelected([]); setOther(''); setFeeling('Okay'); setResult(null);
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto px-5 sm:px-6 py-8 pb-28 md:pb-12">
+      <h1 className="font-display text-3xl text-navy mb-1">Daily Check-in</h1>
+      <p className="text-ink/55 mb-6">How are you feeling today?</p>
+
+      {alreadyToday && !result && (
+        <Card className="p-4 mb-6 bg-mint/40 border-none">
+          <p className="text-sm text-[#1f6b52] font-medium">You already checked in today. You're welcome to submit again if something changes.</p>
+        </Card>
+      )}
+
+      {!result && (
+        <>
+          <Card className="p-6 mb-5">
+            <p className="text-sm font-semibold text-navy mb-3">Overall, how are you feeling?</p>
+            <div className="grid grid-cols-3 gap-3">
+              {['Comfortable','Okay','Not feeling well'].map(f=>(
+                <button key={f} onClick={()=>setFeeling(f)} className={`rounded-xl py-3 text-xs sm:text-sm font-semibold border transition-all focus-ring ${feeling===f?'bg-navy text-white border-navy':'border-navy/15 text-navy hover:border-navy/30'}`}>{f}</button>
+              ))}
+            </div>
+          </Card>
+
+          <Card className="p-6 mb-5">
+            <p className="text-sm font-semibold text-navy mb-1">Any of these today?</p>
+            <p className="text-xs text-ink/50 mb-4">Select any that apply. This helps flag symptoms worth discussing with your provider.</p>
+            <div className="space-y-2.5">
+              {WARNING_SYMPTOMS.map(sym=>(
+                <label key={sym} className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-colors ${selected.includes(sym)?'border-alert/40 bg-alert/5':'border-navy/10 hover:border-navy/25'}`}>
+                  <input type="checkbox" checked={selected.includes(sym)} onChange={()=>toggle(sym)} className="w-5 h-5 rounded accent-[#D9534F]" />
+                  <span className="text-sm text-ink">{sym}</span>
+                </label>
+              ))}
+            </div>
+            <div className="mt-4">
+              <label className="block text-sm font-semibold text-navy mb-2">Other symptom (optional)</label>
+              <input value={other} onChange={e=>setOther(e.target.value)} placeholder="Describe anything else you're noticing" className="w-full rounded-xl border border-navy/15 px-4 py-3 text-sm outline-none focus-ring" />
+            </div>
+          </Card>
+
+          <Button onClick={submit} className="w-full py-3.5 text-base">Submit Check-in</Button>
+        </>
+      )}
+
+      {result && (
+        <div className="animate-rise">
+          {result.riskFlag ? (
+            <Card className="p-6 border-2 border-amber/50 bg-amber/5">
+              <div className="flex items-start gap-3 mb-3">
+                <span className="text-2xl">⚠️</span>
+                <div>
+                  <h2 className="font-display text-xl text-navy">Please contact your healthcare provider</h2>
+                </div>
+              </div>
+              <p className="text-sm text-ink/70 leading-relaxed mb-2">
+                {result.symptoms.length>1
+                  ? "Some of the symptoms you selected may need prompt professional attention. Please contact your healthcare provider for appropriate advice."
+                  : "This symptom is included in the warning-sign checklist used by this prototype. Please discuss it with a qualified healthcare professional."}
+              </p>
+              <div className="flex flex-wrap gap-2 mb-5">
+                {result.symptoms.map(s=><Pill key={s} tone="alert">{s}</Pill>)}
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <Button variant="danger" onClick={reset}>Contact Healthcare Provider</Button>
+                <Button variant="secondary" onClick={reset}>View Check-in</Button>
+                <Button variant="ghost" onClick={reset}>Dismiss</Button>
+              </div>
+            </Card>
+          ) : (
+            <Card className="p-6 bg-mint/30 border-none text-center">
+              <span className="text-3xl block mb-2">🌿</span>
+              <h2 className="font-display text-xl text-navy mb-1">Thanks for checking in</h2>
+              <p className="text-sm text-ink/60 mb-5">No warning symptoms selected today. Keep taking care of yourself.</p>
+              <Button onClick={reset}>Done</Button>
+            </Card>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================= REMINDERS PAGE ============================= */
+function RemindersPage({ data, actions }) {
+  const upcoming = data.events.filter(e=>e.status!=='completed').sort((a,b)=>new Date(a.date)-new Date(b.date));
+  return (
+    <div className="max-w-3xl mx-auto px-5 sm:px-6 py-8 pb-28 md:pb-12">
+      <h1 className="font-display text-3xl text-navy mb-1">Reminders</h1>
+      <p className="text-ink/55 mb-6">Prioritized by how soon they're due.</p>
+
+      {upcoming.length===0 && <EmptyState title="No reminders" subtitle="You're all caught up on your care schedule." />}
+
+      <div className="space-y-3">
+        {upcoming.map(e=>{
+          const d = daysBetween(today(), e.date);
+          const label = d<=0 ? 'TODAY' : d===1 ? 'TOMORROW' : d<=14 ? `IN ${d} DAYS` : `IN ${Math.round(d/7)} WEEKS`;
+          const emoji = e.type==='vaccination'?'💉': e.type==='appointment'?'🩺':'📅';
+          return (
+            <Card key={e.id} className="p-4 flex items-center gap-4 flex-wrap">
+              <div className="w-11 h-11 rounded-2xl bg-lavender/60 flex items-center justify-center text-lg shrink-0">{emoji}</div>
+              <div className="flex-1 min-w-[160px]">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="text-[10px] font-bold tracking-wide text-navy/50">{label}</span>
+                  <Pill tone="navy">Smart Reminder</Pill>
+                </div>
+                <p className="font-semibold text-navy">{e.title}</p>
+                <p className="text-xs text-ink/50">{fmtDate(e.date)}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={()=>actions.toggleReminder(e.id)} className={`text-xs font-semibold px-3 py-2 rounded-xl border ${e.reminderOn?'border-navy/20 text-navy':'border-navy/10 text-ink/40'}`}>{e.reminderOn?'On':'Off'}</button>
+                <Button variant="ghost" className="text-xs py-2 px-3" onClick={()=>actions.snoozeEvent(e.id)}>Snooze</Button>
+                <Button variant="soft" className="text-xs py-2 px-3" onClick={()=>actions.completeEvent(e.id)}>Complete</Button>
+              </div>
+            </Card>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ============================= HISTORY PAGE ============================= */
+function HistoryPage({ data }) {
+  const [filter, setFilter] = useState('all');
+  const items = useMemo(()=>{
+    const evts = data.events.map(e=>({...e, kind:e.type}));
+    const cis = data.checkins.map(c=>({ id:c.id, title:'Symptom check-in', date:c.date, status:'completed', kind:'checkin', riskFlag:c.riskFlag }));
+    let all = [...evts, ...cis].sort((a,b)=> new Date(b.date)-new Date(a.date));
+    if (filter==='checkups') all = all.filter(i=>i.kind==='checkup');
+    if (filter==='vaccinations') all = all.filter(i=>i.kind==='vaccination');
+    if (filter==='checkins') all = all.filter(i=>i.kind==='checkin');
+    return all;
+  }, [data, filter]);
+
+  const completed = data.events.filter(e=>e.status==='completed').length;
+  const totalEvents = data.events.length || 1;
+  const checkinRate = Math.min(100, data.checkins.length * 10);
+
+  return (
+    <div className="max-w-4xl mx-auto px-5 sm:px-6 py-8 pb-28 md:pb-12">
+      <h1 className="font-display text-3xl text-navy mb-1">My Care History</h1>
+      <p className="text-ink/55 mb-6">Completed and upcoming care, together.</p>
+
+      <Card className="p-6 mb-6">
+        <h2 className="text-xs font-bold tracking-wide text-navy/50 mb-4">CARE TRACKING PROGRESS</h2>
+        <div className="space-y-4">
+          {[
+            {label:'Checkups', pct: Math.round((completed/totalEvents)*100)},
+            {label:'Reminders', pct: Math.round((data.events.filter(e=>e.reminderOn).length/totalEvents)*100)},
+            {label:'Check-ins', pct: checkinRate},
+          ].map(row=>(
+            <div key={row.label}>
+              <div className="flex justify-between text-sm mb-1.5"><span className="font-medium text-navy">{row.label}</span><span className="text-ink/50">{row.pct}%</span></div>
+              <div className="h-2.5 rounded-full bg-lavender/60 overflow-hidden">
+                <div className="h-full bg-navy rounded-full transition-all duration-700" style={{width:`${row.pct}%`}}></div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <div className="flex gap-2 mb-5 overflow-x-auto no-scrollbar">
+        {[{k:'all',l:'All'},{k:'checkups',l:'Checkups'},{k:'vaccinations',l:'Vaccinations'},{k:'checkins',l:'Check-ins'}].map(f=>(
+          <button key={f.k} onClick={()=>setFilter(f.k)} className={`px-4 py-2 rounded-xl text-sm font-semibold whitespace-nowrap ${filter===f.k?'bg-navy text-white':'bg-white border border-navy/10 text-navy/70'}`}>{f.l}</button>
+        ))}
+      </div>
+
+      <div className="relative pl-8">
+        <div className="absolute left-[11px] top-2 bottom-2 w-0.5 bg-lavender"></div>
+        {items.map(item=>(
+          <div key={item.id} className="relative mb-4">
+            <div className={`absolute -left-8 top-1.5 w-6 h-6 rounded-full flex items-center justify-center text-[11px] border-2 ${item.status==='completed'?'bg-navy border-navy text-white':'bg-white border-navy/20 text-navy/30'}`}>
+              {item.status==='completed' ? '✓' : '○'}
+            </div>
+            <Card className="p-4 flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <p className="font-semibold text-navy text-sm">{item.title}</p>
+                <p className="text-xs text-ink/50">{fmtDate(item.date)}</p>
+              </div>
+              <StatusPill status={item.status} />
+            </Card>
+          </div>
+        ))}
+        {items.length===0 && <p className="text-sm text-ink/50 py-6">Nothing here yet.</p>}
+      </div>
+    </div>
+  );
+}
+
+/* ============================= JOURNAL PAGE ============================= */
+function JournalPage({ data, actions }) {
+  const [note, setNote] = useState('');
+  function submit() {
+    if (!note.trim()) return;
+    actions.addJournal({ id:`j-${Date.now()}`, date: today(), note: note.trim() });
+    setNote('');
+  }
+  return (
+    <div className="max-w-2xl mx-auto px-5 sm:px-6 py-8 pb-28 md:pb-12">
+      <h1 className="font-display text-3xl text-navy mb-1">Health Journal</h1>
+      <p className="text-ink/55 mb-6">A private space to note how you're feeling. Entries are not medically interpreted.</p>
+
+      <Card className="p-5 mb-6">
+        <textarea value={note} onChange={e=>setNote(e.target.value)} rows={3} placeholder="Feeling comfortable today..." className="w-full rounded-xl border border-navy/15 px-4 py-3 text-sm outline-none focus-ring resize-none" />
+        <div className="flex justify-end mt-3">
+          <Button onClick={submit} disabled={!note.trim()} className={!note.trim()?'opacity-50 cursor-not-allowed':''}>Add Entry</Button>
+        </div>
+      </Card>
+
+      <div className="space-y-3">
+        {[...data.journal].sort((a,b)=>new Date(b.date)-new Date(a.date)).map(j=>(
+          <Card key={j.id} className="p-4">
+            <p className="text-xs text-ink/45 mb-1">{fmtDate(j.date)}</p>
+            <p className="text-sm text-ink">{j.note}</p>
+          </Card>
+        ))}
+        {data.journal.length===0 && <EmptyState title="No entries yet" subtitle="Your journal entries will appear here, most recent first." />}
+      </div>
+    </div>
+  );
+}
+
+/* ============================= PROFILE PAGE ============================= */
+function ProfilePage({ data, actions }) {
+  const [name, setName] = useState(data.profile.name);
+  const [dueDate, setDueDate] = useState(data.profile.dueDate || '');
+  const [prefs, setPrefs] = useState(data.profile.reminderPrefs);
+  const [time, setTime] = useState(data.profile.reminderTime);
+  const [saved, setSaved] = useState(false);
+
+  function save() {
+    actions.updateProfile({ name, dueDate, reminderPrefs: prefs, reminderTime: time });
+    setSaved(true);
+    setTimeout(()=>setSaved(false), 2000);
+  }
+
+  return (
+    <div className="max-w-xl mx-auto px-5 sm:px-6 py-8 pb-28 md:pb-12">
+      <h1 className="font-display text-3xl text-navy mb-1">Profile</h1>
+      <p className="text-ink/55 mb-6">Manage your details and reminder preferences.</p>
+
+      <Card className="p-6 mb-5 space-y-5">
+        <div>
+          <label className="block text-sm font-semibold text-navy mb-2">Name</label>
+          <input value={name} onChange={e=>setName(e.target.value)} className="w-full rounded-xl border border-navy/15 px-4 py-3 text-sm outline-none focus-ring" />
+        </div>
+        <div>
+          <label className="block text-sm font-semibold text-navy mb-2">Expected due date</label>
+          <input type="date" value={dueDate} onChange={e=>setDueDate(e.target.value)} className="w-full rounded-xl border border-navy/15 px-4 py-3 text-sm outline-none focus-ring" />
+        </div>
+      </Card>
+
+      <Card className="p-6 mb-5">
+        <h3 className="text-sm font-semibold text-navy mb-3">Reminder settings</h3>
+        <div className="space-y-2.5 mb-5">
+          {[
+            {k:'checkups', label:'Checkup reminders'},
+            {k:'vaccinations', label:'Vaccination reminders'},
+            {k:'checkin', label:'Daily symptom check-in'},
+            {k:'appointments', label:'Appointment reminders'},
+          ].map(item=>(
+            <label key={item.k} className="flex items-center gap-3 p-3 rounded-xl border border-navy/10 cursor-pointer">
+              <input type="checkbox" checked={prefs[item.k]} onChange={e=>setPrefs(p=>({...p,[item.k]:e.target.checked}))} className="w-5 h-5 rounded accent-[#17233C]" />
+              <span className="text-sm text-ink">{item.label}</span>
+            </label>
+          ))}
+        </div>
+        <label className="block text-sm font-semibold text-navy mb-2">Preferred reminder time</label>
+        <div className="grid grid-cols-3 gap-2">
+          {['Morning','Afternoon','Evening'].map(t=>(
+            <button key={t} onClick={()=>setTime(t)} className={`rounded-xl py-2.5 text-sm font-semibold border ${time===t?'bg-navy text-white border-navy':'border-navy/15 text-navy'}`}>{t}</button>
+          ))}
+        </div>
+      </Card>
+
+      <div className="flex items-center gap-3">
+        <Button onClick={save}>Save changes</Button>
+        {saved && <span className="text-sm text-[#1f6b52] font-medium animate-rise">Saved</span>}
+      </div>
+
+      <Card className="p-6 mt-8 border-dashed border-2 border-navy/10 bg-transparent shadow-none">
+        <h3 className="text-sm font-semibold text-navy mb-1">Demo mode</h3>
+        <p className="text-xs text-ink/50 mb-3">Populate the app with realistic sample data so it can be explored immediately.</p>
+        <Button variant="secondary" onClick={actions.loadDemoData}>Load Demo Data</Button>
+      </Card>
+    </div>
+  );
+}
+
+/* ============================= APP ============================= */
+function App() {
+  const [data, setData] = useState(loadData);
+  const [view, setView] = useState('landing');
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+
+  useEffect(()=>{ saveData(data); }, [data]);
+  useEffect(()=>{ if (data.onboarded && view==='landing') setView('dashboard'); }, []);
+
+  function update(mut) {
+    setData(prev => { const next = { ...prev }; mut(next); return next; });
+  }
+
+  const actions = {
+    completeOnboarding: (payload) => {
+      update(d=>{
+        d.onboarded = true;
+        d.profile = { ...d.profile, ...payload };
+        d.events = generateEvents(payload.dueDate);
+        d.notifications = [
+          { id:'n1', text:'Your pregnancy timeline is ready.', read:false, date: today() },
+          ...d.notifications,
+        ];
+      });
+      setView('dashboard');
+    },
+    completeEvent: (id) => update(d=>{
+      d.events = d.events.map(e=> e.id===id? {...e, status:'completed'} : e);
+    }),
+    toggleReminder: (id) => update(d=>{
+      d.events = d.events.map(e=> e.id===id? {...e, reminderOn: !e.reminderOn} : e);
+    }),
+    snoozeEvent: (id) => update(d=>{
+      d.events = d.events.map(e=> e.id===id? {...e, date: addDays(e.date, 2)} : e);
+    }),
+    addCheckin: (entry) => update(d=>{
+      d.checkins = [entry, ...d.checkins];
+      if (entry.riskFlag) {
+        d.notifications = [{ id:`n-${Date.now()}`, text:`Symptom check-in flagged: ${entry.symptoms[0]}${entry.symptoms.length>1?' and others':''}.`, read:false, date: today() }, ...d.notifications];
+      }
+    }),
+    addJournal: (entry) => update(d=>{ d.journal = [entry, ...d.journal]; }),
+    updateProfile: (payload) => update(d=>{
+      const dueDateChanged = payload.dueDate && payload.dueDate !== d.profile.dueDate;
+      d.profile = { ...d.profile, ...payload };
+      if (dueDateChanged) d.events = generateEvents(payload.dueDate);
+    }),
+    markAllRead: () => update(d=>{ d.notifications = d.notifications.map(n=>({...n, read:true})); }),
+    loadDemoData: () => update(d=>{
+      const due = addDays(today(), 140); // ~20 weeks out
+      d.onboarded = true;
+      d.profile = {
+        name: 'Amara',
+        dueDate: due,
+        reminderPrefs: { checkups:true, vaccinations:true, checkin:true, appointments:true },
+        reminderTime: 'Morning',
+      };
+      const evts = generateEvents(due);
+      // mark a couple as completed for realism
+      evts[0].status='completed'; evts[1].status='completed';
+      d.events = evts;
+      d.checkins = [
+        { id:'demo-ci-1', date: addDays(today(),-1), feeling:'Comfortable', symptoms:[], other:'', riskFlag:false },
+        { id:'demo-ci-2', date: addDays(today(),-3), feeling:'Okay', symptoms:['Severe headache'], other:'', riskFlag:true },
+      ];
+      d.journal = [
+        { id:'demo-j-1', date: addDays(today(),-2), note:'Feeling comfortable today, went for a short walk.' },
+      ];
+      d.notifications = [
+        { id:'demo-n-1', text:'Checkup coming up soon.', read:false, date: today() },
+        { id:'demo-n-2', text:'Vaccination reminder ahead.', read:false, date: today() },
+        { id:'demo-n-3', text:'Daily check-in pending.', read:false, date: today() },
+      ];
+    }),
+  };
+
+  if (view==='landing' && !data.onboarded) {
+    return <Landing onStart={()=>setView('onboarding')} />;
+  }
+  if (view==='onboarding') {
+    return <Onboarding onComplete={actions.completeOnboarding} />;
+  }
+
+  const pageProps = { data, actions, setView };
+
+  return (
+    <div className="min-h-screen bg-[#FAF9FC]" onClick={()=>notifOpen && setNotifOpen(false)}>
+      <TopNav view={view} setView={setView} notifOpen={notifOpen} setNotifOpen={setNotifOpen} notifications={data.notifications} onMarkAllRead={actions.markAllRead} />
+
+      {view==='dashboard' && <Dashboard {...pageProps} />}
+      {view==='timeline' && <TimelinePage {...pageProps} />}
+      {view==='checkin' && <CheckinPage {...pageProps} />}
+      {view==='reminders' && <RemindersPage {...pageProps} />}
+      {view==='history' && <HistoryPage {...pageProps} />}
+      {view==='journal' && <JournalPage {...pageProps} />}
+      {view==='profile' && <ProfilePage {...pageProps} />}
+
+      <Footer />
+      <HelpWidget />
+      <MobileNav view={view} setView={setView} moreOpen={moreOpen} setMoreOpen={setMoreOpen} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
